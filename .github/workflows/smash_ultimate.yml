@@ -1,1 +1,153 @@
+name: Super Smash Bros Ultimate - IPA (No-BC)
 
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GAME_NAME: Smash_Ultimate
+  EXPECTED_DLC_COUNT: "0"
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out NXNative No-BC
+        uses: actions/checkout@v4
+        with:
+          repository: mianmuhammadse/nxnative
+          ref: no-bc
+          path: nxnative
+
+      - name: Check available disk space
+        run: df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.2.app
+          xcodebuild -version
+          xcodebuild -downloadComponent MetalToolchain
+          brew update
+          brew install python@3.12 xcodegen zstd glslang
+          echo "$(brew --prefix python@3.12)/bin" >> "$GITHUB_PATH"
+
+      - name: Free up disk space
+        run: |
+          set +e
+          echo "=== Before cleanup ==="
+          df -h /
+          xcrun simctl delete all
+          sudo rm -rf "$HOME/Library/Developer/CoreSimulator/Caches"
+          sudo rm -rf "$HOME/Library/Android"
+          sudo rm -rf "$HOME/.dotnet" /usr/local/share/dotnet
+          sudo rm -rf "$HOME/hostedtoolcache"
+          sudo rm -rf "$HOME/Library/Caches"/*
+          brew cleanup -s
+          rm -rf "$(brew --cache)"
+          echo "=== After cleanup ==="
+          df -h /
+          exit 0
+
+      - name: Install Python dependencies
+        run: |
+          python3.12 -m venv "$RUNNER_TEMP/nx-venv"
+          "$RUNNER_TEMP/nx-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/nx-venv/bin/python" -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic backports.zstd gdown
+
+      - name: Download base, update, DLCs and keys
+        env:
+          BASE_URL: ${{ secrets.SMASH_ULTIMATE_BASE_NSP_URL }}
+          UPDATE_URL: ${{ secrets.SMASH_ULTIMATE_UPDATE_NSP_URL }}
+          DLC_FOLDER_URL: ${{ secrets.SMASH_ULTIMATE_DLC_FOLDER_URL }}
+          PROD_KEYS: ${{ secrets.PROD_KEYS }}
+        run: |
+          set -euo pipefail
+          GAME_DIR="$RUNNER_TEMP/smash_ultimate"
+          DLC_DIR="$RUNNER_TEMP/smash_ultimate-dlc-download"
+          mkdir -p "$GAME_DIR" "$DLC_DIR"
+
+          for name in BASE_URL PROD_KEYS; do
+            test -n "${!name}" || { echo "Missing required secret: $name"; exit 1; }
+          done
+
+          "$RUNNER_TEMP/nx-venv/bin/gdown" "$BASE_URL" -O "$GAME_DIR/Smash_Ultimate_Base.nsp"
+
+          EXPECTED_TOTAL=1
+          if [ -n "$UPDATE_URL" ]; then
+            "$RUNNER_TEMP/nx-venv/bin/gdown" "$UPDATE_URL" -O "$GAME_DIR/Smash_Ultimate_Update.nsp"
+            test -s "$GAME_DIR/Smash_Ultimate_Update.nsp"
+            EXPECTED_TOTAL=2
+          else
+            echo "No update URL provided, building base game only."
+          fi
+
+          if [ "$EXPECTED_DLC_COUNT" -gt 0 ]; then
+            test -n "$DLC_FOLDER_URL" || { echo "Missing required secret: DLC_FOLDER_URL"; exit 1; }
+            "$RUNNER_TEMP/nx-venv/bin/gdown" --folder "$DLC_FOLDER_URL" -O "$DLC_DIR"
+
+            DLC_COUNT="$(find "$DLC_DIR" -type f -iname '*.nsp' | wc -l | tr -d ' ')"
+            echo "DLC NSP files found: $DLC_COUNT"
+            test "$DLC_COUNT" = "$EXPECTED_DLC_COUNT" || {
+              echo "Expected $EXPECTED_DLC_COUNT DLC NSP files, found $DLC_COUNT."
+              exit 1
+            }
+            find "$DLC_DIR" -type f -iname '*.nsp' -exec cp {} "$GAME_DIR/" \;
+            EXPECTED_TOTAL=$((EXPECTED_TOTAL + EXPECTED_DLC_COUNT))
+          fi
+
+          printf '%s' "$PROD_KEYS" > "$RUNNER_TEMP/prod.keys"
+          TOTAL_COUNT="$(find "$GAME_DIR" -maxdepth 1 -type f -iname '*.nsp' | wc -l | tr -d ' ')"
+          echo "Total NSP files prepared: $TOTAL_COUNT"
+          test "$TOTAL_COUNT" = "$EXPECTED_TOTAL"
+          test -s "$GAME_DIR/Smash_Ultimate_Base.nsp"
+          test -s "$RUNNER_TEMP/prod.keys"
+          ls -lh "$GAME_DIR"
+          df -h /
+
+      - name: Build unsigned Smash Ultimate IPA
+        working-directory: nxnative
+        env:
+          DM_NO_BC_ASTC: all
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/nx-venv/bin/python" scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/smash_ultimate" -k "$RUNNER_TEMP/prod.keys" --allow-other-metal -o "$RUNNER_TEMP/Smash-Ultimate.ipa"
+
+      - name: Report build results
+        if: always()
+        run: |
+          set +e +o pipefail
+          GAME_DIR="$RUNNER_TEMP/smash_ultimate"
+          IPA="$RUNNER_TEMP/Smash-Ultimate.ipa"
+          echo "=== Disk space now ==="
+          df -h /
+          echo "=== Input NSP sizes ==="
+          ls -lh "$GAME_DIR"/*.nsp
+          echo "=== Output IPA ==="
+          ls -lh "$IPA" || echo "No IPA produced"
+          echo "=== Biggest folders in the build directory ==="
+          du -sh "$GAME_DIR"/* 2>/dev/null | sort -h | tail -10
+          echo "=== Extracted program files (ExeFS) ==="
+          find "$GAME_DIR" -path '*/extract/ExeFS/*' -maxdepth 6 -type f -exec ls -lh {} + 2>/dev/null | head -20
+          echo "=== Shader, error and failure lines in build logs ==="
+          find "$GAME_DIR" -path '*_build/logs/*' -type f -exec grep -iHE 'shader.*(fail|error)|error:|failed|skipped' {} + | head -100
+          exit 0
+
+      - name: Upload unsigned IPA and build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smash-ultimate-unsigned-ipa
+          path: |
+            ${{ runner.temp }}/Smash-Ultimate.ipa
+            ${{ runner.temp }}/smash_ultimate/*_build/logs/**
+            ${{ runner.temp }}/smash_ultimate/*_build/profile/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Remove temporary keys
+        if: always()
+        run: rm -f "$RUNNER_TEMP/prod.keys"
