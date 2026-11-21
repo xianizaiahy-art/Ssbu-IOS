@@ -40,8 +40,15 @@ jobs:
           set +e
           echo "=== Before cleanup ==="
           df -h /
+          for x in /Applications/Xcode*.app; do
+            if [ "$x" != "/Applications/Xcode_27.2.app" ]; then
+              echo "Removing $x"
+              sudo rm -rf "$x"
+            fi
+          done
+          xcrun simctl runtime delete all
           xcrun simctl delete all
-          sudo rm -rf "$HOME/Library/Developer/CoreSimulator/Caches"
+          sudo rm -rf "$HOME/Library/Developer/CoreSimulator"
           sudo rm -rf "$HOME/Library/Android"
           sudo rm -rf "$HOME/.dotnet" /usr/local/share/dotnet
           sudo rm -rf "$HOME/hostedtoolcache"
@@ -130,8 +137,8 @@ jobs:
           ls -lh "$IPA" || echo "No IPA produced"
           echo "=== Biggest folders in the build directory ==="
           du -sh "$GAME_DIR"/* 2>/dev/null | sort -h | tail -10
-          echo "=== Extracted program files (ExeFS) ==="
-          find "$GAME_DIR" -path '*/extract/ExeFS/*' -maxdepth 6 -type f -exec ls -lh {} + 2>/dev/null | head -20
+          echo "=== Biggest folders inside the build folder ==="
+          du -sh "$GAME_DIR"/*_build/* 2>/dev/null | sort -h | tail -10
           echo "=== Shader, error and failure lines in build logs ==="
           find "$GAME_DIR" -path '*_build/logs/*' -type f -exec grep -iHE 'shader.*(fail|error)|error:|failed|skipped' {} + | head -100
           exit 0
